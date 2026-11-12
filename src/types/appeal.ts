@@ -18,9 +18,6 @@ export type AppealCategory =
 export type AppealStatus =
   | 'Yangi'
   | 'Qabul qilindi'
-  | 'Ko‘rib chiqilmoqda'
-  | 'Mas’ul xodimga yuborildi'
-  | 'Javob tayyorlandi'
   | 'Yakunlandi';
 
 export interface HistoryItem {
@@ -33,9 +30,13 @@ export interface HistoryItem {
 }
 
 export interface AppealAttachment {
+  id?: string;
   name: string;
   size: number;
   type: string;
+  url?: string;
+  downloadUrl?: string;
+  savedFilename?: string;
   dataUrl?: string;
 }
 
@@ -52,6 +53,7 @@ export interface Appeal {
   subject: string;
   content: string;
   attachment?: AppealAttachment | null;
+  attachments?: AppealAttachment[];
   consent: boolean;
   status: AppealStatus;
   assignedDepartment?: string;
@@ -59,17 +61,25 @@ export interface Appeal {
   deadline?: string;
   officialResponse?: string;
   responseAttachment?: AppealAttachment | null;
+  responseAttachments?: AppealAttachment[];
   internalNotes?: string;
   history: HistoryItem[];
+  // O'chirilgan murojaatlar (Soft delete)
+  isDeleted?: boolean;
+  deletedAt?: string;
+  deletedBy?: string;
+  previousStatus?: AppealStatus;
 }
 
 export interface AppealStats {
   total: number;
   new: number;
-  underReview: number;
-  assigned: number;
-  answered: number;
+  accepted: number;
   completed: number;
+  underReview?: number;
+  assigned?: number;
+  answered?: number;
+  trashCount?: number;
   categoryDistribution: Record<string, number>;
   applicantTypeDistribution: Record<string, number>;
   monthlyTrends: { month: string; count: number; completed: number }[];

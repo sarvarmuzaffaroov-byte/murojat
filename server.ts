@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import * as XLSX from 'xlsx';
 import type { 
   Appeal, 
+  AppealAttachment,
   AppealStats, 
   AppealStatus, 
   BranchSettings 
@@ -17,8 +18,23 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
-app.use(express.json({ limit: '30mb' }));
-app.use(express.urlencoded({ extended: true, limit: '30mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Handle JSON parser errors and payload too large
+app.use((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err) {
+    if (err.type === 'entity.too.large' || err.status === 413) {
+      return res.status(413).json({
+        error: 'Biriktirilgan fayllar hajmi juda katta. Iltimos, hajmi 10 MB dan oshmaydigan fayllarni yuklang.'
+      });
+    }
+    return res.status(400).json({
+      error: 'Yuborilgan ma’lumot noto‘g‘ri formatda.'
+    });
+  }
+  next();
+});
 
 const DATA_DIR = path.resolve(__dirname, 'data');
 const APPEALS_FILE = path.resolve(DATA_DIR, 'appeals.json');
@@ -28,6 +44,91 @@ const ADMIN_FILE = path.resolve(DATA_DIR, 'admin.json');
 // Ensure data directory exists
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+// Persistent Uploads Directory
+const UPLOADS_DIR = path.resolve(DATA_DIR, 'uploads');
+if (!fs.existsSync(UPLOADS_DIR)) {
+  fs.mkdirSync(UPLOADS_DIR, { recursive: true });
+}
+
+// Save uploaded attachment to persistent disk
+function saveUploadedFile(attachment: {
+  name: string;
+  size?: number;
+  type?: string;
+  dataUrl?: string;
+}): AppealAttachment | null {
+  try {
+    if (!attachment || !attachment.dataUrl) return null;
+
+    let buffer: Buffer;
+    let detectedType = attachment.type || 'application/octet-stream';
+
+    const matches = attachment.dataUrl.match(/^data:([A-Za-z-+\/0-9.]+);base64,(.+)$/);
+    if (matches && matches.length === 3) {
+      detectedType = matches[1];
+      buffer = Buffer.from(matches[2], 'base64');
+    } else {
+      buffer = Buffer.from(attachment.dataUrl, 'base64');
+    }
+
+    const safeOriginalName = path.basename(attachment.name || 'hujjat.pdf').replace(/[^a-zA-Z0-9._-]/g, '_');
+    const uniqueFileId = `f_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+    const savedFilename = `${uniqueFileId}_${safeOriginalName}`;
+    const targetPath = path.resolve(UPLOADS_DIR, savedFilename);
+
+    fs.writeFileSync(targetPath, buffer);
+
+    return {
+      id: uniqueFileId,
+      name: attachment.name || safeOriginalName,
+      size: buffer.length,
+      type: detectedType,
+      savedFilename,
+      url: `/api/files/${encodeURIComponent(savedFilename)}`,
+      downloadUrl: `/api/files/download/${encodeURIComponent(savedFilename)}`
+    };
+  } catch (err) {
+    console.error('Error saving uploaded file to disk:', err);
+    return null;
+  }
+}
+
+// Delete all physical files associated with an appeal
+function deleteAppealFiles(appeal: Appeal) {
+  try {
+    const filesToDelete: string[] = [];
+    if (appeal.attachment?.savedFilename) {
+      filesToDelete.push(appeal.attachment.savedFilename);
+    }
+    if (Array.isArray(appeal.attachments)) {
+      for (const att of appeal.attachments) {
+        if (att.savedFilename && !filesToDelete.includes(att.savedFilename)) {
+          filesToDelete.push(att.savedFilename);
+        }
+      }
+    }
+    if (appeal.responseAttachment?.savedFilename) {
+      filesToDelete.push(appeal.responseAttachment.savedFilename);
+    }
+    if (Array.isArray(appeal.responseAttachments)) {
+      for (const att of appeal.responseAttachments) {
+        if (att.savedFilename && !filesToDelete.includes(att.savedFilename)) {
+          filesToDelete.push(att.savedFilename);
+        }
+      }
+    }
+
+    for (const filename of filesToDelete) {
+      const p = path.resolve(UPLOADS_DIR, path.basename(filename));
+      if (fs.existsSync(p)) {
+        fs.unlinkSync(p);
+      }
+    }
+  } catch (err) {
+    console.error('Error deleting appeal files from disk:', err);
+  }
 }
 
 // Default Branch Settings
@@ -96,7 +197,7 @@ const ipSubmissionTracker: Record<string, number[]> = {};
 function checkRateLimit(ip: string): boolean {
   const now = Date.now();
   const windowMs = 10 * 60 * 1000;
-  const maxSubmissions = 8;
+  const maxSubmissions = 30;
 
   if (!ipSubmissionTracker[ip]) {
     ipSubmissionTracker[ip] = [];
@@ -188,9 +289,13 @@ function generateAppealId(appeals: Appeal[]): string {
 }
 
 // Compute 100% REAL statistics from database items
-function computeRealStats(appeals: Appeal[]): AppealStats {
-  const total = appeals.length;
+function computeRealStats(allAppeals: Appeal[]): AppealStats {
+  const activeAppeals = allAppeals.filter(a => !a.isDeleted);
+  const trashCount = allAppeals.filter(a => a.isDeleted === true).length;
+  const total = activeAppeals.length;
+
   let newCount = 0;
+  let acceptedCount = 0;
   let underReviewCount = 0;
   let assignedCount = 0;
   let answeredCount = 0;
@@ -205,16 +310,16 @@ function computeRealStats(appeals: Appeal[]): AppealStats {
     'Iyul', 'Avgust', 'Sentyabr', 'Oktyabr', 'Noyabr', 'Dekabr'
   ];
 
-  for (const a of appeals) {
+  for (const a of activeAppeals) {
     const st = a.status as string;
     if (st === 'Yangi' || st === 'Yangi yuborildi') {
       newCount++;
-    } else if (st === 'Ko‘rib chiqilmoqda' || st === 'Qabul qilindi') {
-      underReviewCount++;
-    } else if (st === 'Mas’ul xodimga yuborildi' || st === 'Mas’ul bo‘limga yuborildi') {
-      assignedCount++;
-    } else if (st === 'Javob tayyorlandi') {
-      answeredCount++;
+    } else if (st === 'Qabul qilindi' || st === 'Ko‘rib chiqilmoqda' || st === 'Mas’ul xodimga yuborildi' || st === 'Javob tayyorlandi') {
+      acceptedCount++;
+      if (st === 'Ko‘rib chiqilmoqda') underReviewCount++;
+      else if (st === 'Mas’ul xodimga yuborildi') assignedCount++;
+      else if (st === 'Javob tayyorlandi') answeredCount++;
+      else underReviewCount++;
     } else if (st === 'Yakunlandi') {
       completedCount++;
     }
@@ -250,10 +355,12 @@ function computeRealStats(appeals: Appeal[]): AppealStats {
   return {
     total,
     new: newCount,
-    underReview: underReviewCount,
+    accepted: acceptedCount,
+    completed: completedCount,
+    underReview: underReviewCount || acceptedCount,
     assigned: assignedCount,
     answered: answeredCount,
-    completed: completedCount,
+    trashCount,
     categoryDistribution,
     applicantTypeDistribution,
     monthlyTrends
@@ -277,7 +384,45 @@ function adminAuth(req: Request, res: Response, next: () => void) {
 
 // ================= PUBLIC API ROUTES =================
 
-// 1. Get Branch Settings (Public)
+// 1. File Preview / Inline Viewing (Public)
+app.get('/api/files/:filename', (req: Request, res: Response) => {
+  try {
+    const rawFilename = req.params.filename;
+    const safeFilename = path.basename(decodeURIComponent(rawFilename));
+    const filePath = path.resolve(UPLOADS_DIR, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Fayl topilmadi yoki o‘chirilgan' });
+    }
+
+    res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(safeFilename)}"`);
+    return res.sendFile(filePath);
+  } catch (err) {
+    return res.status(500).json({ error: 'Faylni ochishda xatolik' });
+  }
+});
+
+// 2. File Download (Public)
+app.get('/api/files/download/:filename', (req: Request, res: Response) => {
+  try {
+    const rawFilename = req.params.filename;
+    const safeFilename = path.basename(decodeURIComponent(rawFilename));
+    const filePath = path.resolve(UPLOADS_DIR, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Fayl topilmadi yoki o‘chirilgan' });
+    }
+
+    const parts = safeFilename.split('_');
+    const originalName = parts.length >= 3 ? parts.slice(2).join('_') : safeFilename;
+
+    return res.download(filePath, originalName);
+  } catch (err) {
+    return res.status(500).json({ error: 'Faylni yuklab olishda xatolik' });
+  }
+});
+
+// 3. Get Branch Settings (Public)
 app.get('/api/settings', (_req: Request, res: Response) => {
   try {
     const settings = loadSettings();
@@ -287,7 +432,7 @@ app.get('/api/settings', (_req: Request, res: Response) => {
   }
 });
 
-// 2. Submit Appeal (Public)
+// 4. Submit Appeal (Public)
 app.post('/api/appeals', (req: Request, res: Response) => {
   try {
     const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
@@ -305,7 +450,8 @@ app.post('/api/appeals', (req: Request, res: Response) => {
       category,
       subject,
       content,
-      attachment
+      attachment,
+      attachments
     } = req.body;
 
     if (!fullName || !fullName.trim()) {
@@ -332,6 +478,33 @@ app.post('/api/appeals', (req: Request, res: Response) => {
       return res.status(400).json({ error: 'Murojaat matni kiritilishi shart' });
     }
 
+    // Process attachments and store onto persistent disk
+    const attachmentsToProcess = Array.isArray(attachments) && attachments.length > 0
+      ? attachments
+      : (attachment ? [attachment] : []);
+
+    const savedAttachments: AppealAttachment[] = [];
+    for (const att of attachmentsToProcess) {
+      if (att) {
+        if (att.savedFilename && fs.existsSync(path.resolve(UPLOADS_DIR, att.savedFilename))) {
+          savedAttachments.push(att);
+        } else if (att.dataUrl) {
+          const saved = saveUploadedFile(att);
+          if (saved) savedAttachments.push(saved);
+        } else if (att.name) {
+          savedAttachments.push({
+            id: `att_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+            name: att.name,
+            size: att.size || 0,
+            type: att.type || 'application/octet-stream',
+            url: att.url || att.dataUrl
+          });
+        }
+      }
+    }
+
+    const primaryAttachment = savedAttachments.length > 0 ? savedAttachments[0] : null;
+
     const appeals = loadAppeals();
     const newId = generateAppealId(appeals);
     const nowIso = new Date().toISOString();
@@ -348,14 +521,11 @@ app.post('/api/appeals', (req: Request, res: Response) => {
       category,
       subject: String(subject).trim(),
       content: String(content).trim(),
-      attachment: attachment ? {
-        name: String(attachment.name || 'fayl'),
-        size: Number(attachment.size || 0),
-        type: String(attachment.type || 'application/octet-stream'),
-        dataUrl: attachment.dataUrl
-      } : null,
+      attachment: primaryAttachment,
+      attachments: savedAttachments,
       consent: true,
       status: 'Yangi',
+      isDeleted: false,
       history: [
         {
           id: `h-${Date.now()}`,
@@ -381,7 +551,8 @@ app.post('/api/appeals', (req: Request, res: Response) => {
         category: newAppeal.category,
         subject: newAppeal.subject,
         status: newAppeal.status,
-        createdAt: newAppeal.createdAt
+        createdAt: newAppeal.createdAt,
+        attachments: newAppeal.attachments
       }
     });
   } catch (err: any) {
@@ -390,7 +561,7 @@ app.post('/api/appeals', (req: Request, res: Response) => {
   }
 });
 
-// 3. Check Appeal Status (Public by ID and Phone)
+// 5. Check Appeal Status (Public by ID and Phone)
 app.post('/api/appeals/check', (req: Request, res: Response) => {
   try {
     const { appealId, phone } = req.body;
@@ -408,11 +579,15 @@ app.post('/api/appeals/check', (req: Request, res: Response) => {
       normalizePhone(a.phone) === cleanPhone
     );
 
-    if (!found) {
+    if (!found || found.isDeleted) {
       return res.status(404).json({
         error: 'Murojaat topilmadi. Murojaat ID raqami va telefon raqami to‘g‘ri kiritilganligini tekshiring.'
       });
     }
+
+    const allAttachments = Array.isArray(found.attachments) && found.attachments.length > 0
+      ? found.attachments
+      : (found.attachment ? [found.attachment] : []);
 
     return res.json({
       success: true,
@@ -429,13 +604,16 @@ app.post('/api/appeals/check', (req: Request, res: Response) => {
         subject: found.subject,
         content: found.content,
         attachmentName: found.attachment?.name,
-        attachmentUrl: found.attachment?.dataUrl,
+        attachmentUrl: found.attachment?.url || found.attachment?.dataUrl,
+        attachmentDownloadUrl: found.attachment?.downloadUrl,
+        attachments: allAttachments,
         status: found.status,
         assignedDepartment: found.assignedDepartment,
         assignedOfficer: found.assignedOfficer,
         deadline: found.deadline,
         officialResponse: found.officialResponse,
         responseAttachment: found.responseAttachment,
+        responseAttachments: found.responseAttachments,
         history: found.history
       }
     });
@@ -445,7 +623,7 @@ app.post('/api/appeals/check', (req: Request, res: Response) => {
   }
 });
 
-// 4. Real Stats (Public)
+// 6. Real Stats (Public)
 app.get('/api/stats', (_req: Request, res: Response) => {
   try {
     const appeals = loadAppeals();
@@ -533,11 +711,16 @@ app.post('/api/admin/change-password', adminAuth, (req: Request, res: Response) 
 
 // ================= PROTECTED ADMIN ROUTES =================
 
-// 7. Get Appeals List with Filters & Search
+// 7. Get Appeals List with Filters & Search (Supports view=active | trash)
 app.get('/api/admin/appeals', adminAuth, (req: Request, res: Response) => {
   try {
-    const { status, category, applicantType, search, startDate, endDate } = req.query;
-    let list = loadAppeals();
+    const { status, category, applicantType, search, startDate, endDate, view } = req.query;
+    const all = loadAppeals();
+
+    // Default view is 'active' (!isDeleted). If view === 'trash', only deleted items.
+    let list = view === 'trash'
+      ? all.filter(a => a.isDeleted === true)
+      : all.filter(a => !a.isDeleted);
 
     if (status && status !== 'all') {
       list = list.filter(a => a.status === status);
@@ -576,7 +759,7 @@ app.get('/api/admin/appeals', adminAuth, (req: Request, res: Response) => {
     return res.json({
       success: true,
       appeals: list,
-      stats: computeRealStats(loadAppeals())
+      stats: computeRealStats(all)
     });
   } catch (err: any) {
     return res.status(500).json({ error: 'Murojaatlar ro‘yxatini yuklashda xatolik' });
@@ -623,6 +806,16 @@ app.patch('/api/admin/appeals/:id', adminAuth, (req: Request, res: Response) => 
       author: author || 'Administrator'
     };
 
+    // If an official response attachment was provided as dataUrl, write it to persistent disk
+    let savedResponseAttachment = current.responseAttachment;
+    if (responseAttachment) {
+      if (responseAttachment.dataUrl) {
+        savedResponseAttachment = saveUploadedFile(responseAttachment) || responseAttachment;
+      } else if (responseAttachment.savedFilename) {
+        savedResponseAttachment = responseAttachment;
+      }
+    }
+
     const updated: Appeal = {
       ...current,
       updatedAt: nowIso,
@@ -631,7 +824,7 @@ app.patch('/api/admin/appeals/:id', adminAuth, (req: Request, res: Response) => 
       assignedOfficer: assignedOfficer !== undefined ? assignedOfficer : current.assignedOfficer,
       deadline: deadline !== undefined ? deadline : current.deadline,
       officialResponse: officialResponse !== undefined ? officialResponse : current.officialResponse,
-      responseAttachment: responseAttachment !== undefined ? responseAttachment : current.responseAttachment,
+      responseAttachment: savedResponseAttachment,
       internalNotes: internalNotes !== undefined ? internalNotes : current.internalNotes,
       history: [historyEntry, ...(current.history || [])]
     };
@@ -650,20 +843,107 @@ app.patch('/api/admin/appeals/:id', adminAuth, (req: Request, res: Response) => 
   }
 });
 
-// 9. Delete Appeal (Admin only)
+// 9. Soft-Delete Appeal (Moves to "O'chirilgan murojaatlar" / Trash)
 app.delete('/api/admin/appeals/:id', adminAuth, (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-    let appeals = loadAppeals();
-    const exists = appeals.some(a => a.id === id);
-    if (!exists) {
+    const appeals = loadAppeals();
+    const index = appeals.findIndex(a => a.id === id);
+
+    if (index === -1) {
       return res.status(404).json({ error: 'Murojaat topilmadi' });
     }
-    appeals = appeals.filter(a => a.id !== id);
+
+    const current = appeals[index];
+    const nowIso = new Date().toISOString();
+
+    current.isDeleted = true;
+    current.deletedAt = nowIso;
+    current.deletedBy = 'Administrator';
+    current.previousStatus = current.status;
+    current.history = [
+      {
+        id: `h-${Date.now()}`,
+        timestamp: nowIso,
+        action: 'Murojaat o‘chirildi va "O‘chirilgan murojaatlar" bo‘limiga o‘tkazildi',
+        author: 'Administrator'
+      },
+      ...(current.history || [])
+    ];
+
     saveAppeals(appeals);
-    return res.json({ success: true, message: 'Murojaat o‘chirildi' });
+    return res.json({
+      success: true,
+      message: 'Murojaat o‘chirildi va "O‘chirilgan murojaatlar" bo‘limiga o‘tkazildi'
+    });
   } catch (err) {
     return res.status(500).json({ error: 'Murojaatni o‘chirishda xatolik' });
+  }
+});
+
+// 10. Restore Appeal from Trash (Qayta tiklash)
+app.post('/api/admin/appeals/:id/restore', adminAuth, (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const appeals = loadAppeals();
+    const index = appeals.findIndex(a => a.id === id);
+
+    if (index === -1) {
+      return res.status(404).json({ error: 'Murojaat topilmadi' });
+    }
+
+    const current = appeals[index];
+    const nowIso = new Date().toISOString();
+
+    current.isDeleted = false;
+    delete current.deletedAt;
+    delete current.deletedBy;
+    current.history = [
+      {
+        id: `h-${Date.now()}`,
+        timestamp: nowIso,
+        action: 'Murojaat "O‘chirilgan murojaatlar" bo‘limidan qayta tiklandi',
+        status: current.status,
+        author: 'Administrator'
+      },
+      ...(current.history || [])
+    ];
+
+    saveAppeals(appeals);
+    return res.json({
+      success: true,
+      message: 'Murojaat muvaffaqiyatli qayta tiklandi va asosiy ro‘yxatga qaytarildi',
+      appeal: current
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Murojaatni qayta tiklashda xatolik' });
+  }
+});
+
+// 11. Permanently Hard-Delete Appeal (Butunlay o'chirish: removes data + physical files)
+app.delete('/api/admin/appeals/:id/permanent', adminAuth, (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    let appeals = loadAppeals();
+    const found = appeals.find(a => a.id === id);
+
+    if (!found) {
+      return res.status(404).json({ error: 'Murojaat topilmadi' });
+    }
+
+    // Delete all attached files from persistent disk
+    deleteAppealFiles(found);
+
+    // Filter out from database completely
+    appeals = appeals.filter(a => a.id !== id);
+    saveAppeals(appeals);
+
+    return res.json({
+      success: true,
+      message: 'Murojaat va unga biriktirilgan barcha fayllar serverdan butunlay o‘chirildi'
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Murojaatni butunlay o‘chirishda xatolik' });
   }
 });
 
@@ -684,7 +964,7 @@ app.put('/api/admin/settings', adminAuth, (req: Request, res: Response) => {
 // 11. Export Appeals to Excel (.xlsx)
 app.get('/api/admin/export/excel', adminAuth, (req: Request, res: Response) => {
   try {
-    const appeals = loadAppeals();
+    const appeals = loadAppeals().filter(a => !a.isDeleted);
 
     const rows = appeals.map((a, idx) => ({
       'T/r': idx + 1,
@@ -697,7 +977,9 @@ app.get('/api/admin/export/excel', adminAuth, (req: Request, res: Response) => {
       'Murojaat yo‘nalishi': a.category,
       'Mavzu': a.subject,
       'Murojaat matni': a.content,
-      'Fayl biriktirilgan': a.attachment ? a.attachment.name : 'Yo‘q',
+      'Fayl biriktirilgan': (a.attachments && a.attachments.length > 0)
+        ? a.attachments.map(att => att.name).join(', ')
+        : (a.attachment ? a.attachment.name : 'Yo‘q'),
       'Holati': a.status,
       'Mas’ul bo‘lim': a.assignedDepartment || '-',
       'Mas’ul xodim': a.assignedOfficer || '-',

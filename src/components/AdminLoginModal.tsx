@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ShieldCheck, Lock, User, AlertCircle, X, KeyRound } from 'lucide-react';
+import { safeFetchJson } from '../utils/api';
 
 interface AdminLoginModalProps {
   isOpen: boolean;
@@ -25,17 +26,15 @@ export const AdminLoginModal: React.FC<AdminLoginModalProps> = ({
     setIsLoading(true);
 
     try {
-      const response = await fetch('/api/auth/login', {
+      const data = await safeFetchJson<{
+        success: boolean;
+        token: string;
+        user: any;
+      }>('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: username.trim(), password })
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Login yoki parol noto‘g‘ri');
-      }
 
       onLoginSuccess(data.token, data.user);
       onClose();

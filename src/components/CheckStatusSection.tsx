@@ -7,10 +7,12 @@ import {
   Download, 
   Printer, 
   ChevronRight,
-  FileText
+  FileText,
+  Paperclip
 } from 'lucide-react';
 import { getStatusBadgeConfig } from '../utils/constants';
 import type { Appeal, AppealStatus } from '../types/appeal';
+import { safeFetchJson } from '../utils/api';
 
 interface CheckStatusSectionProps {
   initialAppealId?: string;
@@ -51,7 +53,10 @@ export const CheckStatusSection: React.FC<CheckStatusSectionProps> = ({
     setIsLoading(true);
 
     try {
-      const response = await fetch('/api/appeals/check', {
+      const data = await safeFetchJson<{
+        success: boolean;
+        appeal: any;
+      }>('/api/appeals/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -59,12 +64,6 @@ export const CheckStatusSection: React.FC<CheckStatusSectionProps> = ({
           phone: cleanPh
         })
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Murojaat topilmadi');
-      }
 
       setAppealData(data.appeal);
     } catch (err: any) {
@@ -80,25 +79,22 @@ export const CheckStatusSection: React.FC<CheckStatusSectionProps> = ({
     handleSearchWith(appealId, phone);
   };
 
-  // 6 Stepper Stages
-  const stages: { key: AppealStatus; label: string }[] = [
-    { key: 'Yangi', label: '1. Yangi' },
-    { key: 'Qabul qilindi', label: '2. Qabul qilindi' },
-    { key: 'Ko‘rib chiqilmoqda', label: '3. Ko‘rib chiqilmoqda' },
-    { key: 'Mas’ul xodimga yuborildi', label: '4. Mas’ul xodimga yuborildi' },
-    { key: 'Javob tayyorlandi', label: '5. Javob tayyorlandi' },
-    { key: 'Yakunlandi', label: '6. Yakunlandi' }
+  // 3 Stepper Stages (Yangi, Qabul qilindi, Yakunlandi)
+  const stages: { key: AppealStatus; label: string; desc: string }[] = [
+    { key: 'Yangi', label: '1. Yangi', desc: 'Murojaat tizimga yuborildi' },
+    { key: 'Qabul qilindi', label: '2. Qabul qilindi', desc: 'Admin tomonidan tasdiqlandi' },
+    { key: 'Yakunlandi', label: '3. Yakunlandi', desc: 'Ijro to‘liq yakunlandi' }
   ];
 
   const getStepIndex = (status: AppealStatus | string): number => {
     switch (status) {
       case 'Yangi': return 0;
-      case 'Qabul qilindi': return 1;
-      case 'Ko‘rib chiqilmoqda': return 2;
+      case 'Qabul qilindi':
+      case 'Ko‘rib chiqilmoqda':
       case 'Mas’ul xodimga yuborildi':
-      case 'Mas’ul bo‘limga yuborildi': return 3;
-      case 'Javob tayyorlandi': return 4;
-      case 'Yakunlandi': return 5;
+      case 'Mas’ul bo‘limga yuborildi':
+      case 'Javob tayyorlandi': return 1;
+      case 'Yakunlandi': return 2;
       default: return 0;
     }
   };
@@ -213,13 +209,18 @@ export const CheckStatusSection: React.FC<CheckStatusSectionProps> = ({
               </div>
             </div>
 
-            {/* Stepper */}
+            {/* 3-Stage Stepper */}
             <div className="px-6 py-2">
-              <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">
-                Ijro bosqichlari
-              </h4>
+              <div className="flex items-center justify-between mb-3">
+                <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                  Ijro bosqichlari (3 bosqichli monitoring)
+                </h4>
+                <span className="text-xs font-semibold text-[#0f3b75]">
+                  Joriy holat: <span className="font-bold">{appealData.status}</span>
+                </span>
+              </div>
 
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
                 {stages.map((st, idx) => {
                   const isDone = idx < currentStepIdx || (idx === currentStepIdx && appealData.status === 'Yakunlandi');
                   const isCurrent = idx === currentStepIdx && appealData.status !== 'Yakunlandi';
@@ -227,28 +228,37 @@ export const CheckStatusSection: React.FC<CheckStatusSectionProps> = ({
                   return (
                     <div
                       key={st.key}
-                      className={`p-2.5 rounded-xl border text-xs transition-all ${
+                      className={`p-3.5 rounded-xl border text-xs transition-all relative ${
                         isDone
-                          ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                          ? 'bg-emerald-50/80 border-emerald-300 text-emerald-950 shadow-xs'
                           : isCurrent
-                          ? 'bg-blue-50 border-blue-300 ring-2 ring-blue-500/20 text-[#0f3b75] font-bold'
+                          ? 'bg-blue-50/90 border-blue-400 ring-2 ring-blue-500/20 text-[#0f3b75] shadow-xs'
                           : 'bg-slate-50 border-slate-200 text-slate-400'
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-[10px] font-bold">
-                          {isDone ? 'Bajarildi' : isCurrent ? 'Jarayonda' : `Bosqich ${idx + 1}`}
+                      <div className="flex items-center justify-between mb-1.5">
+                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                          isDone
+                            ? 'bg-emerald-200/60 text-emerald-800'
+                            : isCurrent
+                            ? 'bg-blue-200/60 text-blue-900'
+                            : 'bg-slate-200/60 text-slate-500'
+                        }`}>
+                          {isDone ? '✓ Bajarildi' : isCurrent ? '● Jarayonda' : `${idx + 1}-bosqich`}
                         </span>
                         {isDone ? (
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                         ) : isCurrent ? (
-                          <Clock className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+                          <Clock className="w-4 h-4 text-blue-600 animate-spin shrink-0" />
                         ) : (
-                          <div className="w-3 h-3 rounded-full border border-slate-300"></div>
+                          <div className="w-4 h-4 rounded-full border-2 border-slate-300 shrink-0"></div>
                         )}
                       </div>
-                      <div className="font-semibold text-slate-800 text-[11px] leading-tight">
+                      <div className="font-bold text-slate-900 text-sm mb-0.5">
                         {st.label}
+                      </div>
+                      <div className="text-[11px] text-slate-500 leading-snug">
+                        {st.desc}
                       </div>
                     </div>
                   );
@@ -312,6 +322,64 @@ export const CheckStatusSection: React.FC<CheckStatusSectionProps> = ({
                 <p className="text-slate-800 whitespace-pre-line leading-relaxed">
                   {appealData.content}
                 </p>
+
+                {/* Biriktirilgan fayllar */}
+                {((appealData.attachments && appealData.attachments.length > 0) || appealData.attachment) && (
+                  <div className="pt-3 border-t border-slate-200 mt-2 space-y-2">
+                    <span className="text-xs text-slate-500 font-bold block">
+                      Biriktirilgan hujjatlar:
+                    </span>
+                    <div className="space-y-2">
+                      {(appealData.attachments && appealData.attachments.length > 0
+                        ? appealData.attachments
+                        : (appealData.attachment ? [appealData.attachment] : [])
+                      ).map((att, idx) => {
+                        const viewUrl = att.url || att.dataUrl;
+                        const dlUrl = att.downloadUrl || att.url || att.dataUrl;
+                        return (
+                          <div
+                            key={att.id || idx}
+                            className="flex flex-wrap items-center justify-between p-2.5 bg-white rounded-xl border border-slate-200 text-xs gap-2"
+                          >
+                            <div className="flex items-center gap-2 truncate">
+                              <Paperclip className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span className="font-semibold text-slate-800 truncate">
+                                {att.name}
+                              </span>
+                              {att.size > 0 && (
+                                <span className="text-slate-400 text-[11px]">
+                                  ({(att.size / 1024 / 1024).toFixed(2)} MB)
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {viewUrl && (
+                                <a
+                                  href={viewUrl}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-lg transition-colors"
+                                >
+                                  <span>Ko‘rish</span>
+                                </a>
+                              )}
+                              {dlUrl && (
+                                <a
+                                  href={dlUrl}
+                                  download={att.name}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-[#0f3b75] hover:bg-[#1a4b87] text-white font-bold rounded-lg transition-colors"
+                                >
+                                  <Download className="w-3 h-3" />
+                                  <span>Yuklab olish</span>
+                                </a>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
 

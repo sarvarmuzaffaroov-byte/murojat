@@ -17,7 +17,12 @@ import {
   AlertCircle,
   FileText,
   UserCheck,
-  Building2
+  Building2,
+  RotateCcw,
+  AlertTriangle,
+  Paperclip,
+  Download,
+  Check
 } from 'lucide-react';
 import { 
   APPEAL_CATEGORIES, 
@@ -27,6 +32,7 @@ import {
 } from '../utils/constants';
 import { AdminAppealModal } from './AdminAppealModal';
 import type { Appeal, AppealStats, BranchSettings } from '../types/appeal';
+import { safeFetchJson } from '../utils/api';
 
 interface AdminDashboardProps {
   token: string;
@@ -39,7 +45,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onLogout,
   onSettingsUpdated
 }) => {
-  const [activeTab, setActiveTab] = useState<'appeals' | 'settings' | 'security'>('appeals');
+  const [activeTab, setActiveTab] = useState<'appeals' | 'trash' | 'settings' | 'security'>('appeals');
   const [appeals, setAppeals] = useState<Appeal[]>([]);
   const [stats, setStats] = useState<AppealStats | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -69,13 +75,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [passwordMsg, setPasswordMsg] = useState<{ text: string; isError: boolean } | null>(null);
   const [isChangingPassword, setIsChangingPassword] = useState(false);
 
-  // Fetch appeals from backend
+  // In-app Delete Confirmation Dialog State (never blocked in iframes)
+  const [deleteDialog, setDeleteDialog] = useState<{
+    isOpen: boolean;
+    appealId: string;
+    isPermanent: boolean;
+    isDeleting: boolean;
+  }>({
+    isOpen: false,
+    appealId: '',
+    isPermanent: false,
+    isDeleting: false
+  });
+
+  // In-app Notification / Toast
+  const [toast, setToast] = useState<{
+    message: string;
+    type: 'success' | 'error';
+  } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => {
+      setToast((curr) => (curr?.message === message ? null : curr));
+    }, 4500);
+  };
+
+  // Fetch appeals from backend (respects activeTab view)
   const fetchAppeals = async () => {
     setIsLoading(true);
     setErrorMessage(null);
 
     try {
       const params = new URLSearchParams();
+      params.append('view', activeTab === 'trash' ? 'trash' : 'active');
       if (selectedStatus !== 'all') params.append('status', selectedStatus);
       if (selectedCategory !== 'all') params.append('category', selectedCategory);
       if (selectedApplicantType !== 'all') params.append('applicantType', selectedApplicantType);
@@ -83,25 +116,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       if (startDate) params.append('startDate', startDate);
       if (endDate) params.append('endDate', endDate);
 
-      const response = await fetch(`/api/admin/appeals?${params.toString()}`, {
+      const data = await safeFetchJson<{
+        success: boolean;
+        appeals: Appeal[];
+        stats: AppealStats;
+      }>(`/api/admin/appeals?${params.toString()}`, {
         headers: {
           Authorization: `Bearer ${token}`
         }
       });
 
-      if (response.status === 401) {
-        onLogout();
-        return;
-      }
-
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Murojaatlarni yuklashda xatolik');
-      }
-
       setAppeals(data.appeals || []);
       setStats(data.stats || null);
     } catch (err: any) {
+      if (err.message?.includes('401') || err.message?.includes('Avtorizatsiya')) {
+        onLogout();
+        return;
+      }
       setErrorMessage(err.message || 'Xatolik yuz berdi');
     } finally {
       setIsLoading(false);
@@ -111,20 +142,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Fetch settings
   const fetchSettings = async () => {
     try {
-      const res = await fetch('/api/settings');
-      if (res.ok) {
-        const data = await res.json();
-        setSettingsData(data);
-      }
+      const data = await safeFetchJson<BranchSettings>('/api/settings');
+      setSettingsData(data);
     } catch (err) {
-      console.error(err);
+      console.error('Settings load error:', err);
     }
   };
 
   useEffect(() => {
     fetchAppeals();
     fetchSettings();
-  }, [selectedStatus, selectedCategory, selectedApplicantType, startDate, endDate]);
+  }, [activeTab, selectedStatus, selectedCategory, selectedApplicantType, startDate, endDate]);
 
   const handleResetFilters = () => {
     setSearchTerm('');
@@ -145,23 +173,105 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     fetchAppeals();
   };
 
-  // Delete appeal
-  const handleDeleteAppeal = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm(`${id} raqamli murojaatni o‘chirmoqchimisiz?`)) return;
+  // 1. Request Soft Delete (opens in-app modal)
+  const requestSoftDelete = (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setDeleteDialog({
+      isOpen: true,
+      appealId: id,
+      isPermanent: false,
+      isDeleting: false
+    });
+  };
+
+  // 2. Request Permanent Hard-Delete (opens in-app modal)
+  const requestPermanentDelete = (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    setDeleteDialog({
+      isOpen: true,
+      appealId: id,
+      isPermanent: true,
+      isDeleting: false
+    });
+  };
+
+  // 3. Confirm Delete (Executed when user clicks "Ha, o‘chirilsin" in in-app modal)
+  const handleConfirmDelete = async () => {
+    const { appealId, isPermanent } = deleteDialog;
+    if (!appealId) return;
+
+    setDeleteDialog(prev => ({ ...prev, isDeleting: true }));
 
     try {
-      const res = await fetch(`/api/admin/appeals/${id}`, {
+      const endpoint = isPermanent
+        ? `/api/admin/appeals/${appealId}/permanent`
+        : `/api/admin/appeals/${appealId}`;
+
+      await safeFetchJson(endpoint, {
         method: 'DELETE',
         headers: { Authorization: `Bearer ${token}` }
       });
-      if (res.ok) {
-        fetchAppeals();
-      } else {
-        alert('O‘chirishda xatolik');
+
+      setDeleteDialog({ isOpen: false, appealId: '', isPermanent: false, isDeleting: false });
+
+      if (editingAppeal?.id === appealId) {
+        setIsModalOpen(false);
+        setEditingAppeal(null);
       }
-    } catch (err) {
-      alert('Tarmoq xatosi');
+
+      showToast(
+        isPermanent
+          ? `${appealId} raqamli murojaat va fayllari serverdan butunlay o‘chirildi.`
+          : `${appealId} raqamli murojaat "O‘chirilgan murojaatlar" bo‘limiga o‘tkazildi.`,
+        'success'
+      );
+
+      fetchAppeals();
+    } catch (err: any) {
+      setDeleteDialog(prev => ({ ...prev, isDeleting: false }));
+      showToast(err.message || 'O‘chirishda xatolik yuz berdi', 'error');
+    }
+  };
+
+  // 4. Restore appeal from trash
+  const handleRestoreAppeal = async (id: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    try {
+      await safeFetchJson(`/api/admin/appeals/${id}/restore`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      showToast(`${id} raqamli murojaat muvaffaqiyatli qayta tiklandi va asosiy ro‘yxatga qaytarildi.`, 'success');
+      fetchAppeals();
+    } catch (err: any) {
+      showToast(err.message || 'Qayta tiklashda xatolik yuz berdi', 'error');
+    }
+  };
+
+  // Quick 3-Stage Confirmation by Admin
+  const handleQuickStatusChange = async (id: string, newStatus: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      const comment = newStatus === 'Qabul qilindi' 
+        ? 'Administrator tomonidan qabul qilindi va ijroga tasdiqlandi'
+        : 'Administrator tomonidan ijro to‘liq yakunlandi va tasdiqlandi';
+
+      await safeFetchJson(`/api/admin/appeals/${id}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          status: newStatus,
+          comment
+        })
+      });
+
+      showToast(`${id} holati "${newStatus}" ga o‘zgartirildi`, 'success');
+      fetchAppeals();
+    } catch (err: any) {
+      showToast(err.message || 'Holatni yangilashda xatolik yuz berdi', 'error');
     }
   };
 
@@ -173,7 +283,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setSettingsSuccessMsg(null);
 
     try {
-      const res = await fetch('/api/admin/settings', {
+      await safeFetchJson('/api/admin/settings', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
@@ -181,13 +291,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         },
         body: JSON.stringify(settingsData)
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Xatolik');
       setSettingsSuccessMsg('Filial aloqa ma’lumotlari muvaffaqiyatli saqlandi!');
       onSettingsUpdated();
       setTimeout(() => setSettingsSuccessMsg(null), 3000);
     } catch (err: any) {
-      alert(err.message || 'Saqlashda xatolik');
+      showToast(err.message || 'Saqlashda xatolik', 'error');
     } finally {
       setIsSavingSettings(false);
     }
@@ -206,7 +314,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setIsChangingPassword(true);
 
     try {
-      const res = await fetch('/api/admin/change-password', {
+      await safeFetchJson('/api/admin/change-password', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -217,9 +325,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           newPassword
         })
       });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || 'Xatolik');
 
       setPasswordMsg({ text: 'Parol muvaffaqiyatli yangilandi!', isError: false });
       setCurrentPassword('');
@@ -249,8 +354,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
+      showToast('Excel hisoboti muvaffaqiyatli yuklab olindi!', 'success');
     } catch (err: any) {
-      alert('Excel yuklab olishda xatolik: ' + err.message);
+      showToast('Excel yuklab olishda xatolik: ' + err.message, 'error');
     }
   };
 
@@ -271,8 +377,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       a.click();
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
+      showToast('Ma’lumotlar bazasi zaxira nusxasi yuklandi!', 'success');
     } catch (err: any) {
-      alert('Zaxira olishda xatolik: ' + err.message);
+      showToast('Zaxira olishda xatolik: ' + err.message, 'error');
     }
   };
 
@@ -322,9 +429,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
 
-        {/* 5 Real Metrics Cards */}
+        {/* 4 Real Metrics Cards (matching 3 stages) */}
         {stats && (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             <div 
               onClick={() => setSelectedStatus('all')}
               className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'all' ? 'ring-2 ring-[#0f3b75] bg-white' : 'bg-white hover:bg-slate-50'} border-slate-200 shadow-xs`}
@@ -337,54 +444,66 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               onClick={() => setSelectedStatus('Yangi')}
               className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'Yangi' ? 'ring-2 ring-blue-600 bg-blue-50' : 'bg-white hover:bg-blue-50/40'} border-blue-200 shadow-xs`}
             >
-              <div className="text-xs font-bold text-blue-700 uppercase">Yangi murojaatlar</div>
+              <div className="text-xs font-bold text-blue-700 uppercase">1. Yangi murojaatlar</div>
               <div className="text-2xl font-extrabold text-blue-700 mt-1">{stats.new}</div>
             </div>
 
             <div 
-              onClick={() => setSelectedStatus('Ko‘rib chiqilmoqda')}
-              className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'Ko‘rib chiqilmoqda' ? 'ring-2 ring-amber-600 bg-amber-50' : 'bg-white hover:bg-amber-50/40'} border-amber-200 shadow-xs`}
+              onClick={() => setSelectedStatus('Qabul qilindi')}
+              className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'Qabul qilindi' ? 'ring-2 ring-indigo-600 bg-indigo-50' : 'bg-white hover:bg-indigo-50/40'} border-indigo-200 shadow-xs`}
             >
-              <div className="text-xs font-bold text-amber-700 uppercase">Ko‘rib chiqilmoqda</div>
-              <div className="text-2xl font-extrabold text-amber-700 mt-1">{stats.underReview}</div>
-            </div>
-
-            <div 
-              onClick={() => setSelectedStatus('Javob tayyorlandi')}
-              className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'Javob tayyorlandi' ? 'ring-2 ring-teal-600 bg-teal-50' : 'bg-white hover:bg-teal-50/40'} border-teal-200 shadow-xs`}
-            >
-              <div className="text-xs font-bold text-teal-700 uppercase">Javob tayyorlangan</div>
-              <div className="text-2xl font-extrabold text-teal-700 mt-1">{stats.answered}</div>
+              <div className="text-xs font-bold text-indigo-700 uppercase">2. Qabul qilindi</div>
+              <div className="text-2xl font-extrabold text-indigo-700 mt-1">{stats.accepted ?? stats.underReview ?? 0}</div>
             </div>
 
             <div 
               onClick={() => setSelectedStatus('Yakunlandi')}
-              className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'Yakunlandi' ? 'ring-2 ring-emerald-600 bg-emerald-50' : 'bg-white hover:bg-emerald-50/40'} border-emerald-200 shadow-xs col-span-2 sm:col-span-1`}
+              className={`p-4 rounded-xl border cursor-pointer transition-all ${selectedStatus === 'Yakunlandi' ? 'ring-2 ring-emerald-600 bg-emerald-50' : 'bg-white hover:bg-emerald-50/40'} border-emerald-200 shadow-xs`}
             >
-              <div className="text-xs font-bold text-emerald-700 uppercase">Yakunlangan</div>
+              <div className="text-xs font-bold text-emerald-700 uppercase">3. Yakunlangan</div>
               <div className="text-2xl font-extrabold text-emerald-700 mt-1">{stats.completed}</div>
             </div>
           </div>
         )}
 
         {/* Tab Navigation in Admin: Murojaatlar | Filial Aloqa Sozlamalari | Xavfsizlik */}
-        <div className="flex items-center gap-2 border-b border-slate-200 pb-1">
+        <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 pb-1">
           <button
-            onClick={() => setActiveTab('appeals')}
-            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+            onClick={() => { setActiveTab('appeals'); handleResetFilters(); }}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'appeals'
-                ? 'bg-[#0f3b75] text-white'
+                ? 'bg-[#0f3b75] text-white shadow-xs'
                 : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
             }`}
           >
-            Murojaatlar ro‘yxati ({appeals.length})
+            <Inbox className="w-3.5 h-3.5" />
+            <span>Murojaatlar ro‘yxati {stats ? `(${stats.total})` : ''}</span>
+          </button>
+
+          <button
+            onClick={() => { setActiveTab('trash'); handleResetFilters(); }}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
+              activeTab === 'trash'
+                ? 'bg-rose-700 text-white shadow-xs'
+                : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
+            }`}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>O‘chirilgan murojaatlar</span>
+            {stats?.trashCount !== undefined && stats.trashCount > 0 && (
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-extrabold ${
+                activeTab === 'trash' ? 'bg-white text-rose-700' : 'bg-rose-100 text-rose-700'
+              }`}>
+                {stats.trashCount}
+              </span>
+            )}
           </button>
 
           <button
             onClick={() => setActiveTab('settings')}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'settings'
-                ? 'bg-[#0f3b75] text-white'
+                ? 'bg-[#0f3b75] text-white shadow-xs'
                 : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
             }`}
           >
@@ -396,7 +515,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             onClick={() => setActiveTab('security')}
             className={`px-4 py-2 rounded-xl text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5 ${
               activeTab === 'security'
-                ? 'bg-[#0f3b75] text-white'
+                ? 'bg-[#0f3b75] text-white shadow-xs'
                 : 'bg-white text-slate-700 hover:bg-slate-200 border border-slate-200'
             }`}
           >
@@ -573,6 +692,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                             <td className="py-3 px-4 text-right whitespace-nowrap">
                               <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                {/* Quick 3-stage admin confirmation button */}
+                                {appeal.status === 'Yangi' && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handleQuickStatusChange(appeal.id, 'Qabul qilindi', e)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer shadow-xs"
+                                    title="Qabul qilindi deb tasdiqlash"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    <span>Qabul qilish</span>
+                                  </button>
+                                )}
+                                {appeal.status === 'Qabul qilindi' && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => handleQuickStatusChange(appeal.id, 'Yakunlandi', e)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer shadow-xs"
+                                    title="Yakunlandi deb tasdiqlash"
+                                  >
+                                    <Check className="w-3 h-3" />
+                                    <span>Yakunlash</span>
+                                  </button>
+                                )}
+
                                 <button
                                   type="button"
                                   onClick={() => handleOpenEdit(appeal)}
@@ -583,9 +726,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={(e) => handleDeleteAppeal(appeal.id, e)}
+                                  onClick={(e) => requestSoftDelete(appeal.id, e)}
                                   className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                                  title="O‘chirish"
+                                  title="O‘chirish (Chiqindi qutisiga o‘tkazish)"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -602,7 +745,147 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         )}
 
-        {/* TAB 2: SETTINGS (Editable Branch Info) */}
+        {/* TAB: TRASH (O'chirilgan murojaatlar) */}
+        {activeTab === 'trash' && (
+          <div className="space-y-4">
+            {/* Warning / Informational Banner */}
+            <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex items-start gap-3">
+              <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+              <div className="text-xs text-amber-900 leading-relaxed">
+                <strong className="font-bold block text-sm text-amber-950 mb-0.5">
+                  O‘chirilgan murojaatlar bo‘limi (Chiqindi qutisi)
+                </strong>
+                Ushbu bo‘limda vaqtincha o‘chirilgan murojaatlar saqlanadi. Ular asosiy ro‘yxat va umumiy ko‘rsatkichlardan chiqarilgan. Kerak bo‘lganda murojaatni asl holatida va biriktirilgan hujjatlari bilan <strong>"Qayta tiklash"</strong> orqali asosiy ro‘yxatga qaytarishingiz yoki zarur bo‘lsa serverdan <strong>"Butunlay o‘chirish"</strong> mumkin.
+              </div>
+            </div>
+
+            {/* Trash Table */}
+            <div className="bg-white rounded-2xl shadow-xs border border-slate-200 overflow-hidden">
+              <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                <h3 className="font-bold text-[#0f3b75] text-sm flex items-center gap-2">
+                  <Trash2 className="w-4 h-4 text-rose-600" />
+                  <span>Chiqindi qutisidagi murojaatlar ({appeals.length})</span>
+                </h3>
+              </div>
+
+              {appeals.length === 0 ? (
+                <div className="p-12 text-center text-slate-400 text-xs">
+                  <Trash2 className="w-10 h-10 mx-auto text-slate-300 mb-2 opacity-50" />
+                  <span className="font-medium text-slate-500">Hozirda o‘chirilgan murojaatlar mavjud emas</span>
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs text-slate-600">
+                    <thead className="bg-slate-50 text-[11px] font-bold text-slate-500 uppercase tracking-wider border-b border-slate-200">
+                      <tr>
+                        <th className="py-3 px-4">Murojaat ID</th>
+                        <th className="py-3 px-4">Murojaatchi</th>
+                        <th className="py-3 px-4">Yo‘nalish</th>
+                        <th className="py-3 px-4">Mavzu</th>
+                        <th className="py-3 px-4">Oldingi holati</th>
+                        <th className="py-3 px-4">O‘chirilgan vaqt</th>
+                        <th className="py-3 px-4 text-right">Amallar</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {appeals.map((appeal) => {
+                        const badge = getStatusBadgeConfig(appeal.previousStatus || appeal.status);
+                        return (
+                          <tr
+                            key={appeal.id}
+                            className="hover:bg-slate-50/80 transition-colors"
+                          >
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <span className="font-mono font-bold text-slate-700">
+                                {appeal.id}
+                              </span>
+                              <div className="text-[10px] text-slate-400">
+                                Yuborilgan: {new Date(appeal.createdAt).toLocaleDateString('uz-UZ')}
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-4">
+                              <div className="font-bold text-slate-900">
+                                {appeal.fullName}
+                              </div>
+                              <div className="text-[11px] text-slate-500">
+                                {appeal.applicantType} • {appeal.phone}
+                              </div>
+                            </td>
+
+                            <td className="py-3 px-4 text-slate-800">
+                              {appeal.category}
+                            </td>
+
+                            <td className="py-3 px-4 max-w-xs">
+                              <div className="truncate font-medium text-slate-900" title={appeal.subject}>
+                                {appeal.subject}
+                              </div>
+                              {((appeal.attachments && appeal.attachments.length > 0) || appeal.attachment) && (
+                                <span className="inline-flex items-center gap-1 text-[10px] text-emerald-700 font-semibold mt-0.5">
+                                  <Paperclip className="w-3 h-3" />
+                                  Hujjat mavjud
+                                </span>
+                              )}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold border ${badge.bg} ${badge.text} ${badge.border}`}>
+                                <span>{appeal.previousStatus || appeal.status}</span>
+                              </span>
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap text-slate-500 text-[11px]">
+                              {appeal.deletedAt
+                                ? new Date(appeal.deletedAt).toLocaleString('uz-UZ')
+                                : 'Sana yo‘q'}
+                            </td>
+
+                            <td className="py-3 px-4 text-right whitespace-nowrap">
+                              <div className="flex items-center justify-end gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                <button
+                                  type="button"
+                                  onClick={() => handleOpenEdit(appeal)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                                  title="Ko‘rish"
+                                >
+                                  <FileText className="w-3 h-3" />
+                                  <span>Ko‘rish</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleRestoreAppeal(appeal.id, e)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs rounded-lg transition-colors cursor-pointer shadow-xs"
+                                  title="Asosiy ro‘yxatga qayta tiklash"
+                                >
+                                  <RotateCcw className="w-3 h-3" />
+                                  <span>Qayta tiklash</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={(e) => requestPermanentDelete(appeal.id, e)}
+                                  className="inline-flex items-center gap-1 px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-xs rounded-lg transition-colors cursor-pointer"
+                                  title="Butunlay o‘chirish"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Butunlay o‘chirish</span>
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* TAB 3: SETTINGS (Editable Branch Info) */}
         {activeTab === 'settings' && settingsData && (
           <div className="bg-white rounded-2xl shadow-xs border border-slate-200 p-6 space-y-5">
             <div className="border-b border-slate-100 pb-3">
@@ -818,8 +1101,85 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         isOpen={isModalOpen}
         onClose={() => setIsModalOpen(false)}
         onUpdateSuccess={handleUpdateSuccess}
+        onDeleteAppeal={requestSoftDelete}
         token={token}
       />
+
+      {/* IN-APP DELETE CONFIRMATION MODAL (100% reliable in iframes) */}
+      {deleteDialog.isOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 max-w-md w-full overflow-hidden p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 rounded-xl bg-rose-100 text-rose-600 flex items-center justify-center shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900">
+                  {deleteDialog.isPermanent
+                    ? 'Butunlay o‘chirishni tasdiqlaysizmi?'
+                    : 'Murojaatni o‘chirishni tasdiqlaysizmi?'}
+                </h3>
+                <span className="font-mono text-xs font-bold text-[#0f3b75]">
+                  ID: {deleteDialog.appealId}
+                </span>
+              </div>
+            </div>
+
+            <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+              {deleteDialog.isPermanent ? (
+                <span className="text-rose-700 font-medium">
+                  OGOHLANTIRISH: Ushbu murojaat va unga biriktirilgan barcha fayllar serverdan butunlay o‘chiriladi. Bu amalni qaytarib bo‘lmaydi.
+                </span>
+              ) : (
+                <span>
+                  Ushbu murojaat asosiy ro‘yxatdan olib tashlanadi va <strong>"O‘chirilgan murojaatlar"</strong> (Chiqindi qutisi) bo‘limiga o‘tkaziladi. Uni istalgan vaqtda qayta tiklashingiz mumkin.
+                </span>
+              )}
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                disabled={deleteDialog.isDeleting}
+                onClick={() => setDeleteDialog({ isOpen: false, appealId: '', isPermanent: false, isDeleting: false })}
+                className="px-4 py-2.5 rounded-xl border border-slate-300 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+              >
+                Bekor qilish
+              </button>
+              <button
+                type="button"
+                disabled={deleteDialog.isDeleting}
+                onClick={handleConfirmDelete}
+                className="inline-flex items-center gap-2 px-5 py-2.5 bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-bold text-xs rounded-xl shadow-md transition-colors cursor-pointer disabled:opacity-75"
+              >
+                {deleteDialog.isDeleting ? (
+                  <>
+                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                    <span>O‘chirilmoqda...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-4 h-4" />
+                    <span>Ha, o‘chirilsin</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FLOATING TOAST NOTIFICATION */}
+      {toast && (
+        <div className="fixed bottom-5 right-5 z-50 flex items-center gap-3 px-4 py-3 rounded-xl shadow-xl border animate-in slide-in-from-bottom-5 duration-200 bg-slate-900 text-white border-slate-800">
+          {toast.type === 'success' ? (
+            <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+          ) : (
+            <AlertCircle className="w-5 h-5 text-rose-400 shrink-0" />
+          )}
+          <span className="text-xs sm:text-sm font-medium">{toast.message}</span>
+        </div>
+      )}
     </div>
   );
 };

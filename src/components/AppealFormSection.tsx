@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { APPLICANT_TYPES, APPEAL_CATEGORIES } from '../utils/constants';
 import type { ApplicantType, AppealCategory, AppealAttachment } from '../types/appeal';
+import { safeFetchJson } from '../utils/api';
 
 interface AppealFormSectionProps {
   onCheckAppeal: (appealId: string, phone: string) => void;
@@ -36,7 +37,8 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
   const [category, setCategory] = useState<AppealCategory>('Ta’lim jarayoni');
   const [subject, setSubject] = useState('');
   const [content, setContent] = useState('');
-  const [attachment, setAttachment] = useState<AppealAttachment | null>(null);
+  const [attachments, setAttachments] = useState<AppealAttachment[]>([]);
+  const [consent, setConsent] = useState(false);
 
   // States
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,31 +55,71 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
     setPhone(val);
   };
 
-  // Handle file attachment
+  // Handle file attachment (Supports multiple files up to 5, total max 15MB)
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
 
-    // Check size limit: 10MB
-    if (file.size > 10 * 1024 * 1024) {
-      alert('Fayl hajmi 10 MB dan oshmasligi kerak!');
+    if (attachments.length + files.length > 5) {
+      setErrorMessage('Maksimal 5 tagacha hujjat biriktirish mumkin!');
+      e.target.value = '';
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      setAttachment({
-        name: file.name,
-        size: file.size,
-        type: file.type || 'application/octet-stream',
-        dataUrl: reader.result as string
-      });
-    };
-    reader.readAsDataURL(file);
+    const currentTotalSize = attachments.reduce((acc, a) => acc + (a.size || 0), 0);
+    let newIncomingSize = 0;
+
+    const allowedExtensions = ['.pdf', '.doc', '.docx', '.jpg', '.jpeg', '.png'];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const ext = '.' + file.name.split('.').pop()?.toLowerCase();
+      
+      if (!allowedExtensions.includes(ext)) {
+        setErrorMessage(`"${file.name}" fayl formati qo‘llab-quvvatlanmaydi. Faqat PDF, DOC, DOCX, JPG, PNG formatidagi fayllarni yuklashingiz mumkin.`);
+        e.target.value = '';
+        return;
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        setErrorMessage(`"${file.name}" fayli 10 MB dan katta. Iltimos, kichikroq hajmdagi fayl tanlang.`);
+        e.target.value = '';
+        return;
+      }
+
+      newIncomingSize += file.size;
+    }
+
+    if (currentTotalSize + newIncomingSize > 15 * 1024 * 1024) {
+      setErrorMessage('Biriktirilayotgan barcha fayllarning umumiy hajmi 15 MB dan oshmasligi lozim.');
+      e.target.value = '';
+      return;
+    }
+
+    setErrorMessage(null);
+
+    Array.from(files).forEach((file) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        setAttachments((prev) => [
+          ...prev,
+          {
+            id: `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+            name: file.name,
+            size: file.size,
+            type: file.type || 'application/octet-stream',
+            dataUrl: reader.result as string
+          }
+        ]);
+      };
+      reader.readAsDataURL(file);
+    });
+
+    e.target.value = '';
   };
 
-  const removeAttachment = () => {
-    setAttachment(null);
+  const removeAttachment = (indexToRemove: number) => {
+    setAttachments((prev) => prev.filter((_, idx) => idx !== indexToRemove));
   };
 
   // Submit Handler
@@ -109,10 +151,20 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
       return;
     }
 
+    if (!consent) {
+      setErrorMessage('Iltimos, shaxsiy ma’lumotlarni qayta ishlashga rozilik bildiring');
+      return;
+    }
+
     setIsSubmitting(true);
 
     try {
-      const response = await fetch('/api/appeals', {
+      const data = await safeFetchJson<{
+        success: boolean;
+        appealId: string;
+        message: string;
+        appeal: any;
+      }>('/api/appeals', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -125,20 +177,15 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
           category,
           subject: cleanSubject,
           content: cleanContent,
-          attachment
+          attachments,
+          attachment: attachments.length > 0 ? attachments[0] : null
         })
       });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.error || 'Murojaatni saqlashda xatolik yuz berdi');
-      }
 
       setSubmittedAppealId(data.appealId);
       onRefreshStats();
     } catch (err: any) {
-      setErrorMessage(err.message || 'Tarmoq xatosi. Qaytadan urinib ko‘ring.');
+      setErrorMessage(err.message || 'Murojaat yuborishda xatolik yuz berdi. Qaytadan urinib ko‘ring.');
     } finally {
       setIsSubmitting(false);
     }
@@ -158,7 +205,8 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
     setCategory('Ta’lim jarayoni');
     setSubject('');
     setContent('');
-    setAttachment(null);
+    setAttachments([]);
+    setConsent(false);
     setSubmittedAppealId(null);
   };
 
@@ -409,38 +457,56 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
 
               {/* Fayl biriktirish */}
               <div>
-                <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Fayl biriktirish <span className="text-slate-400 font-normal">(ixtiyoriy, PDF, JPG, PNG, DOCX - max 10MB)</span>
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                    Fayl biriktirish <span className="text-slate-400 font-normal">(ixtiyoriy, PDF, JPG, PNG, DOCX - max 10MB)</span>
+                  </label>
+                  {attachments.length > 0 && (
+                    <span className="text-xs text-emerald-700 font-semibold">{attachments.length}/5 fayl</span>
+                  )}
+                </div>
 
-                {attachment ? (
-                  <div className="flex items-center justify-between p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs">
-                    <div className="flex items-center gap-2 truncate">
-                      <Paperclip className="w-4 h-4 text-emerald-600 shrink-0" />
-                      <span className="font-semibold text-slate-900 truncate">
-                        {attachment.name}
-                      </span>
-                      <span className="text-slate-500">
-                        ({(attachment.size / 1024 / 1024).toFixed(2)} MB)
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={removeAttachment}
-                      className="p-1 text-slate-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
-                      title="Faylni o‘chirish"
-                    >
-                      <X className="w-4 h-4" />
-                    </button>
+                {attachments.length > 0 && (
+                  <div className="space-y-2 mb-2.5">
+                    {attachments.map((att, idx) => (
+                      <div
+                        key={att.id || idx}
+                        className="flex items-center justify-between p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs"
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <Paperclip className="w-4 h-4 text-emerald-600 shrink-0" />
+                          <span className="font-semibold text-slate-900 truncate">
+                            {att.name}
+                          </span>
+                          <span className="text-slate-500">
+                            ({(att.size / 1024 / 1024).toFixed(2)} MB)
+                          </span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => removeAttachment(idx)}
+                          className="p-1 text-slate-400 hover:text-rose-600 rounded-lg transition-colors cursor-pointer"
+                          title="Faylni o‘chirish"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                ) : (
+                )}
+
+                {attachments.length < 5 && (
                   <label className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-slate-300 hover:border-[#0f3b75] rounded-xl cursor-pointer bg-slate-50/50 hover:bg-blue-50/30 transition-all text-center">
                     <FileUp className="w-6 h-6 text-slate-400 mb-1" />
                     <span className="text-xs font-semibold text-slate-700">
-                      Hujjat yoki rasmni tanlang
+                      {attachments.length > 0 ? '+ Yana fayl qo‘shish' : 'Hujjat yoki rasmni tanlang'}
+                    </span>
+                    <span className="text-[11px] text-slate-400 mt-0.5">
+                      Bir nechta fayl tanlashingiz mumkin
                     </span>
                     <input
                       type="file"
+                      multiple
                       accept=".pdf,.jpg,.jpeg,.png,.docx,.doc"
                       onChange={handleFileChange}
                       className="hidden"
@@ -449,12 +515,32 @@ export const AppealFormSection: React.FC<AppealFormSectionProps> = ({
                 )}
               </div>
 
+              {/* Shaxsiy ma'lumotlarni qayta ishlashga rozilik */}
+              <div className="pt-1">
+                <label className="flex items-start sm:items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={consent}
+                    onChange={(e) => setConsent(e.target.checked)}
+                    required
+                    className="mt-0.5 sm:mt-0 w-4 h-4 rounded text-emerald-600 focus:ring-emerald-500 border-slate-300 cursor-pointer"
+                  />
+                  <span className="text-xs sm:text-sm text-slate-700 font-medium">
+                    Shaxsiy ma’lumotlarni qayta ishlashga roziman <span className="text-rose-500">*</span>
+                  </span>
+                </label>
+              </div>
+
               {/* Submit Button */}
               <div className="pt-2">
                 <button
                   type="submit"
-                  disabled={isSubmitting}
-                  className="w-full flex items-center justify-center gap-2.5 py-3.5 px-6 rounded-xl font-bold text-sm bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 text-white shadow-md transition-colors cursor-pointer"
+                  disabled={isSubmitting || !consent}
+                  className={`w-full flex items-center justify-center gap-2.5 py-3.5 px-6 rounded-xl font-bold text-sm text-white shadow-md transition-all cursor-pointer ${
+                    !consent || isSubmitting
+                      ? 'bg-slate-400 cursor-not-allowed opacity-80'
+                      : 'bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800'
+                  }`}
                 >
                   {isSubmitting ? (
                     <>

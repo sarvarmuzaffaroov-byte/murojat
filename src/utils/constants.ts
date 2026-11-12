@@ -62,9 +62,6 @@ export const APPEAL_CATEGORIES: { value: AppealCategory; label: string; desc: st
 export const APPEAL_STATUSES: AppealStatus[] = [
   'Yangi',
   'Qabul qilindi',
-  'Ko‘rib chiqilmoqda',
-  'Mas’ul xodimga yuborildi',
-  'Javob tayyorlandi',
   'Yakunlandi'
 ];
 
