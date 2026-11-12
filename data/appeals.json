@@ -1,0 +1,63 @@
+[
+  {
+    "id": "TKTI-2026-0102",
+    "trackingCode": "TKTI-2026-0102",
+    "createdAt": "2026-11-12T11:25:54.229Z",
+    "updatedAt": "2026-11-12T11:26:16.971Z",
+    "fullName": "Rustamov Jasur Anvarovich",
+    "phone": "+998 90 123 45 67",
+    "email": "jasur.rustamov@gmail.com",
+    "applicantType": "Talaba",
+    "category": "Ta’lim jarayoni",
+    "subject": "Yakuniy nazorat natijalarini qayta ko‘rib chiqish",
+    "content": "Hurmatli dekanat! Men Kimyo texnologiyasi yo‘nalishi talabasiman. Organik kimyo fani bo‘yicha topshirgan yakuniy nazorat ishimni apellyatsiya komissiyasi ishtirokida qayta ko‘rib chiqishingizni so‘rayman.",
+    "attachment": null,
+    "consent": true,
+    "status": "Ko‘rib chiqilmoqda",
+    "history": [
+      {
+        "id": "h-1794482776971",
+        "timestamp": "2026-11-12T11:26:16.971Z",
+        "action": "Holat o‘zgartirildi: Yangi ➔ Ko‘rib chiqilmoqda",
+        "status": "Ko‘rib chiqilmoqda",
+        "comment": "Rasmiy javob tayyorlandi",
+        "author": "Administrator"
+      },
+      {
+        "id": "h-1794482754229",
+        "timestamp": "2026-11-12T11:25:54.229Z",
+        "action": "Murojaat yuborildi va ro‘yxatga olindi",
+        "status": "Yangi",
+        "author": "Murojaatchi"
+      }
+    ],
+    "assignedDepartment": "O‘quv-uslubiy bo‘lim",
+    "assignedOfficer": "Salimov Dilshod Baxtiyorovich",
+    "officialResponse": "Sizning arizangiz o‘quv-uslubiy bo‘limi tomonidan qabul qilindi. 15-noyabr kuni apellyatsiya komissiyasi yig‘ilishi o‘tkaziladi."
+  },
+  {
+    "id": "TKTI-2026-0101",
+    "trackingCode": "TKTI-2026-0101",
+    "createdAt": "2026-11-12T11:24:50.868Z",
+    "updatedAt": "2026-11-12T11:24:50.868Z",
+    "fullName": "Azizov Bekzod Mansurovich",
+    "phone": "+998 90 777 66 55",
+    "email": "bekzod.azizov@edu.uz",
+    "applicantType": "Talaba",
+    "category": "Boshqa masalalar",
+    "subject": "2-semestr uchun talabalar turar joyiga joylashish masalasi",
+    "content": "Men Kimyo muhandisligi yo‘nalishi 1-bosqich talabasiman. Toshkent viloyatidan qatnab o‘qish uzoqligi sababli, filialimizning yangi TTJ binosidan yotoqxona o‘rni ajratishingizni so‘rayman.",
+    "attachment": null,
+    "consent": true,
+    "status": "Yangi yuborildi",
+    "history": [
+      {
+        "id": "h-1794482690868",
+        "timestamp": "2026-11-12T11:24:50.868Z",
+        "action": "Murojaat platforma orqali muvaffaqiyatli qabul qilindi",
+        "status": "Yangi yuborildi",
+        "author": "Murojaatchi"
+      }
+    ]
+  }
+]
